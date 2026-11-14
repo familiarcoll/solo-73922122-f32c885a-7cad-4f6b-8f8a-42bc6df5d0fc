@@ -15,7 +15,6 @@ from .parser import parse_csv
 from .publishing import (
     find_conflicts,
     is_publishable,
-    render_utc_csv,
     unresolved_ambiguous,
 )
 
@@ -119,27 +118,22 @@ async def choose(
 
 @app.post("/review/{session_id}/publish")
 def publish(request: Request, session_id: str):
-    view = db.get_session(session_id)
-    if view is None:
-        raise HTTPException(status_code=404, detail="复核会话不存在")
-    if not view.is_active:
+    # All decision-making happens inside one BEGIN IMMEDIATE transaction
+    # (see db.publish_session): the rows are re-read under the write lock
+    # and re-validated, so a choice saved by another window while this
+    # request was in flight cannot be validated against a stale snapshot.
+    try:
+        meta = db.publish_session(session_id)
+    except db.StaleSession:
         return _stale_response(request, session_id)
-
-    result = view.as_parse_result()
-    ok, reasons = is_publishable(result)
-    if not ok:
+    except db.PublishConflict as exc:
         return TEMPLATES.TemplateResponse(
             request,
             "review.html",
             _review_context(request, session_id,
-                            notice="发布被阻止：" + "；".join(reasons)),
+                            notice="发布被阻止：" + "；".join(exc.reasons)),
             status_code=422,
         )
-
-    csv_text = render_utc_csv(result)
-    meta = db.save_publication(
-        session_id, view.filename, csv_text, len(result.kept_rows)
-    )
     return RedirectResponse(
         url=f"/review/{session_id}?published={meta['id']}", status_code=303
     )

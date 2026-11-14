@@ -10,6 +10,19 @@ Two kinds of state live here:
 * **publications** — the full result of every successful release.  The
   newest row is always the downloadable "previous complete result",
   which remains available after a later upload fails validation.
+
+Concurrency model (safe with several service processes sharing one file)
+-----------------------------------------------------------------------
+
+The database runs in WAL mode and every mutating operation opens with
+``BEGIN IMMEDIATE``, which takes the database write lock up front.  A
+publication therefore runs as one serialized write transaction: the rows
+are re-read *inside* the lock and re-validated, so a fold choice saved by
+another window/process while a publish was in flight is either visible to
+the publish (and its conflict blocks it, with nothing registered) or is
+forced to wait until the publish has committed the immutable CSV
+snapshot.  ``busy_timeout`` makes contenders wait for the lock instead
+of failing immediately.
 """
 
 from __future__ import annotations
@@ -17,16 +30,18 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .models import KeptRow, ParseResult
-from .publishing import apply_choice
-from .tz import to_utc
+from .publishing import apply_choice, is_publishable, render_utc_csv
 
 DB_PATH = Path(os.environ.get("TIDEDB_PATH", "/data/tide.db"))
+
+# How long a writer waits on the write lock held by another process
+# before raising OperationalError("database is locked").
+BUSY_TIMEOUT_MS = 10_000
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -68,19 +83,50 @@ CREATE TABLE IF NOT EXISTS publications (
 
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    # isolation_level=None -> autocommit; transactions are started
+    # explicitly with BEGIN IMMEDIATE so the write lock is taken eagerly.
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=BUSY_TIMEOUT_MS / 1000,
+        isolation_level=None,
+    )
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
 def init_db() -> None:
-    with _connect() as conn:
+    conn = _connect()
+    try:
+        # WAL lets readers (review pages, downloads) keep working while a
+        # choice/publish transaction holds the write lock. The mode is
+        # persisted in the database file, so every worker process inherits it.
+        conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+    finally:
+        conn.close()
 
 
 class StaleSession(Exception):
     """Raised when a superseded session is used for a mutating action."""
+
+
+class PublishConflict(Exception):
+    """Raised when a publish transaction sees unresolvable problems.
+
+    The transaction is rolled back, so no publication row is registered
+    and the previously published complete CSV stays the latest one.
+    """
+
+    def __init__(self, reasons: list[str]):
+        self.reasons = reasons
+        super().__init__("；".join(reasons))
+
+
+# Test seam: invoked after the publication row is inserted but before the
+# transaction commits.  Nothing in production code assigns this.
+_publish_pre_commit: Optional[Callable[[str], None]] = None
 
 
 class SessionView:
@@ -122,7 +168,9 @@ def create_session(session_id: str, filename: str, result: ParseResult) -> Sessi
         }
         for r in result.superseded_rows
     ]
-    with _connect() as conn:
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("UPDATE sessions SET status = 'superseded'")
         conn.execute(
             "INSERT INTO sessions (session_id, filename, status, created_at, "
@@ -157,6 +205,12 @@ def create_session(session_id: str, filename: str, result: ParseResult) -> Sessi
                 for r in result.kept_rows
             ],
         )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     view = get_session(session_id)
     assert view is not None
     return view
@@ -187,26 +241,39 @@ def _load_kept_rows(conn: sqlite3.Connection, session_id: str) -> list[KeptRow]:
 
 
 def get_session(session_id: str) -> Optional[SessionView]:
-    with _connect() as conn:
+    conn = _connect()
+    try:
         row = conn.execute(
             "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()
         if row is None:
             return None
         return SessionView(row, _load_kept_rows(conn, session_id))
+    finally:
+        conn.close()
 
 
 def latest_session_id() -> Optional[str]:
-    with _connect() as conn:
+    conn = _connect()
+    try:
         row = conn.execute(
             "SELECT session_id FROM sessions ORDER BY serial DESC LIMIT 1"
         ).fetchone()
         return row["session_id"] if row else None
+    finally:
+        conn.close()
 
 
 def set_fold_choice(session_id: str, line_no: int, choice: str) -> None:
-    """Persist one early/late choice; rejects stale sessions."""
-    with _connect() as conn:
+    """Persist one early/late choice; rejects stale sessions.
+
+    Runs as a single ``BEGIN IMMEDIATE`` transaction so it is mutually
+    exclusive with a concurrent publish (and any other writer), even when
+    the requests land in different worker processes.
+    """
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
         session = conn.execute(
             "SELECT status FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()
@@ -238,41 +305,87 @@ def set_fold_choice(session_id: str, line_no: int, choice: str) -> None:
             "WHERE session_id = ? AND line_no = ?",
             (row.fold_choice, row.utc_time.isoformat(), session_id, line_no),
         )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
-def save_publication(session_id: str, source_filename: str,
-                     content: str, row_count: int) -> dict:
-    with _connect() as conn:
+def publish_session(session_id: str) -> dict:
+    """Publish one session atomically.
+
+    The whole decision runs inside one ``BEGIN IMMEDIATE`` transaction:
+
+    1. take the database write lock, blocking any concurrent choice or
+       publish (across processes, via SQLite file locking + busy timeout);
+    2. re-read the session and every row *within* the lock, so choices
+       saved just now cannot be missed by a stale in-memory snapshot;
+    3. re-run the full publishability check, including UTC conflicts;
+    4. on any problem roll back — no publication row is registered and
+       the previous complete CSV remains the latest download;
+    5. otherwise insert the rendered CSV snapshot and commit.  Later
+       choices can no longer touch the stored content.
+    """
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
         session = conn.execute(
-            "SELECT status FROM sessions WHERE session_id = ?", (session_id,)
+            "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
         ).fetchone()
         if session is None:
             raise KeyError(session_id)
         if session["status"] != "active":
             raise StaleSession(session_id)
+
+        view = SessionView(session, _load_kept_rows(conn, session_id))
+        result = view.as_parse_result()
+        ok, reasons = is_publishable(result)
+        if not ok:
+            raise PublishConflict(reasons)
+
+        csv_text = render_utc_csv(result)
         published_at = datetime.now(timezone.utc).isoformat()
         cur = conn.execute(
             "INSERT INTO publications (session_id, source_filename, "
             "published_at, row_count, content) VALUES (?, ?, ?, ?, ?)",
-            (session_id, source_filename, published_at, row_count, content),
+            (session_id, view.filename, published_at,
+             len(result.kept_rows), csv_text),
         )
+        pub_id = cur.lastrowid
+        if _publish_pre_commit is not None:
+            _publish_pre_commit(session_id)
+        conn.commit()
         return {
-            "id": cur.lastrowid,
+            "id": pub_id,
             "published_at": published_at,
-            "row_count": row_count,
-            "source_filename": source_filename,
+            "row_count": len(result.kept_rows),
+            "source_filename": view.filename,
+            "content": csv_text,
         }
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def latest_publication() -> Optional[sqlite3.Row]:
-    with _connect() as conn:
+    conn = _connect()
+    try:
         return conn.execute(
             "SELECT * FROM publications ORDER BY id DESC LIMIT 1"
         ).fetchone()
+    finally:
+        conn.close()
 
 
 def publication_by_id(pub_id: int) -> Optional[sqlite3.Row]:
-    with _connect() as conn:
+    conn = _connect()
+    try:
         return conn.execute(
             "SELECT * FROM publications WHERE id = ?", (pub_id,)
         ).fetchone()
+    finally:
+        conn.close()

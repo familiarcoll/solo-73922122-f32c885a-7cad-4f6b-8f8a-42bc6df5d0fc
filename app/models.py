@@ -32,7 +32,7 @@ class KeptRow:
     raw_local_text: str
     water_level: float
     time_kind: str  # "normal" | "ambiguous" | "gap"
-    fold_choice: Optional[int] = None  # None until operator picks (ambiguous)
+    fold_choice: Optional[str] = None  # "early" | "late" | None until operator picks
     utc_time: Optional[datetime] = None  # set once normal or chosen
 
 

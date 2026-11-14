@@ -1,6 +1,18 @@
 services:
   tide:
     build: .
+    # Multiple worker processes share the same SQLite file on the volume.
+    # The app serializes every mutating transaction with BEGIN IMMEDIATE
+    # (WAL + busy_timeout), so cross-process choice/publish races are safe.
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --workers
+      - "2"
     ports:
       - "8000:8000"
     volumes:
@@ -9,6 +21,11 @@ services:
       TZ: America/New_York
       TIDEDB_PATH: /data/tide.db
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
   tide-data:
