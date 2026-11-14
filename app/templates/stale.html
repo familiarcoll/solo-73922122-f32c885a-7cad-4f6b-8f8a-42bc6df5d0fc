@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}复核页已失效{% endblock %}
+{% block body %}
+<div class="card">
+  <h2>⛔ 操作被拒绝：该复核页对应的文件已不是当前文件</h2>
+  <p>
+    会话 <code>{{ session_id }}</code>
+    {% if view %}（文件 <code>{{ view.filename }}</code>）{% endif %}
+    已被之后上传的新文件取代。为保证「预览与选择只对本次文件有效」，
+    本页面的时段选择和发布操作均不会写入新文件。
+  </p>
+  <p>
+    <a class="btn" href="/">前往上传页查看/处理当前文件</a>
+    {% if latest_pub %}
+      <a class="btn secondary" href="/download/latest">下载上一份完整发布结果（#{{ latest_pub.id }}）</a>
+    {% endif %}
+  </p>
+  <p class="muted">旧文件的复核数据仍保留在数据库中，可只读查看其复核页。</p>
+  {% if view %}<p><a class="btn secondary" href="/review/{{ session_id }}">只读查看旧复核页</a></p>{% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}复核 {{ view.filename }}{% endblock %}
+{% block body %}
+
+{% if not view.is_active %}
+<div class="msg msg-err" id="stale-banner">
+  ⚠ 此复核页已失效：另一个浏览器/会话上传了新文件。本页面的选择与发布操作均被拒绝，
+  数据不会写入新文件。<a href="/">前往上传页处理新文件</a>。
+</div>
+{% endif %}
+
+{% if notice %}
+  <div class="msg {{ 'msg-ok' if publishable else 'msg-warn' }}">{{ notice }}</div>
+{% endif %}
+{% if published_id %}
+  <div class="msg msg-ok">
+    ✅ 发布成功！<a class="btn secondary" href="/download/publication/{{ published_id }}">
+    下载本次发布的 UTC CSV（#{{ published_id }}）</a>
+  </div>
+{% endif %}
+
+<div class="card">
+  <h2>文件：{{ view.filename }}
+    <span class="badge {{ 'b-active' if view.is_active else 'b-stale' }}">
+      {{ '当前有效' if view.is_active else '已被新文件取代' }}
+    </span>
+  </h2>
+  <p class="muted">复核会话 <code>{{ view.session_id }}</code> ｜ 上传时间 {{ view.created_at }}</p>
+  <div class="pill-row">
+    <div class="stat"><b>{{ result.kept_rows|length }}</b>有效行（最高修订）</div>
+    <div class="stat"><b>{{ view.superseded_info|length }}</b>被取代的低修订行</div>
+    <div class="stat"><b>{{ view.duplicate_lines|length }}</b>完全重复行（已折叠）</div>
+    <div class="stat"><b>{{ result.errors|length }}</b>硬性错误</div>
+    <div class="stat"><b>{{ unresolved|length }}</b>待选择重复时段</div>
+    <div class="stat"><b>{{ conflicts|length }}</b>UTC 冲突</div>
+  </div>
+</div>
+
+{% if result.errors %}
+<div class="card">
+  <h2>❌ 校验错误（{{ result.errors|length }}）</h2>
+  <ul class="tight">
+    {% for e in result.errors %}<li>{{ e }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if conflicts %}
+<div class="card">
+  <h2>⛔ UTC 时刻冲突（{{ conflicts|length }}，阻止发布）</h2>
+  {% for c in conflicts %}
+  <p>设备 <code>{{ c.device_id }}</code> 在 UTC
+     <code>{{ c.utc_text }}</code> 对应了不同源记录：
+     {% for r in c.rows %}
+       第 {{ r.line_no }} 行（源记录 {{ r.source_record_id }}，水位 {{ r.water_level }}）{% if not loop.last %}；{% endif %}
+     {% endfor %}
+  </p>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>逐行复核（{{ result.kept_rows|length }} 行）</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>CSV 行号</th><th>设备号</th><th>源记录号</th><th>修订号</th>
+        <th>本地时刻 (America/New_York)</th><th>水位</th><th>时间类型</th>
+        <th>早/晚选择</th><th>换算 UTC</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in result.kept_rows %}
+      <tr>
+        <td>{{ r.line_no }}</td>
+        <td>{{ r.device_id }}</td>
+        <td>{{ r.source_record_id }}</td>
+        <td>{{ r.revision }}</td>
+        <td>{{ r.raw_local_text }}</td>
+        <td>{{ r.water_level }}</td>
+        <td>
+          {% if r.time_kind == 'normal' %}<span class="badge b-normal">正常</span>
+          {% elif r.time_kind == 'ambiguous' %}<span class="badge b-ambiguous">重复时段（待判定）</span>
+          {% else %}<span class="badge b-gap">不存在时刻</span>{% endif %}
+        </td>
+        <td>
+          {% if r.time_kind == 'ambiguous' %}
+            <form class="inline review-form" method="post"
+                  action="/review/{{ view.session_id }}/choice">
+              <input type="hidden" name="line_no" value="{{ r.line_no }}">
+              <button type="submit" name="choice" value="early"
+                      {% if not view.is_active %}disabled{% endif %}
+                      {% if r.fold_choice == 'early' %}style="font-weight:800"{% endif %}>
+                早时段
+              </button>
+              <button type="submit" name="choice" value="late"
+                      {% if not view.is_active %}disabled{% endif %}
+                      {% if r.fold_choice == 'late' %}style="font-weight:800"{% endif %}>
+                晚时段
+              </button>
+            </form>
+            {% if r.fold_choice %}<div class="muted">已选：{{ '早时段' if r.fold_choice == 'early' else '晚时段' }}</div>{% endif %}
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td>{% if r.utc_time %}{{ r.utc_time.strftime('%Y-%m-%dT%H:%M:%SZ') }}{% else %}<span class="muted">待定</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if view.superseded_info or view.duplicate_lines %}
+<div class="card">
+  <h2>修订与去重明细</h2>
+  {% if view.superseded_info %}
+  <p class="muted">以下行因同设备同源记录存在更高修订号而未参与转换：</p>
+  <ul class="tight">
+    {% for s in view.superseded_info %}
+    <li>第 {{ s.line_no }} 行：设备 {{ s.device_id }} ｜ 源记录 {{ s.source_record_id }} ｜ 修订 {{ s.revision }} <span class="badge b-super">已取代</span></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if view.duplicate_lines %}
+  <p class="muted">完全重复、已折叠的 CSV 行号：{{ view.duplicate_lines | join(', ') }}</p>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>发布</h2>
+  {% if publishable %}
+    <p class="msg msg-ok">全部问题已解决，可发布并下载 UTC CSV（共 {{ result.kept_rows|length }} 行）。</p>
+  {% else %}
+    <p class="msg msg-err">当前不可发布，剩余问题：</p>
+    <ul class="tight">{% for reason in block_reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+  {% endif %}
+  <form class="review-form" method="post" action="/review/{{ view.session_id }}/publish">
+    <button type="submit" {% if not publishable or not view.is_active %}disabled{% endif %}>
+      发布 UTC CSV
+    </button>
+    {% if latest_pub %}
+      <a class="btn secondary" href="/download/latest">改为下载上一份完整结果（#{{ latest_pub.id }}）</a>
+    {% endif %}
+  </form>
+</div>
+
+<script>
+// If another browser uploads a new file, this tab becomes read-only.
+(async function () {
+  const sid = {{ view.session_id | tojson }};
+  const forms = document.querySelectorAll('.review-form');
+  const disableAll = () => {
+    forms.forEach(f => f.querySelectorAll('button').forEach(b => b.disabled = true));
+    if (!document.getElementById('stale-banner')) {
+      const banner = document.createElement('div');
+      banner.className = 'msg msg-err';
+      banner.id = 'stale-banner';
+      banner.innerHTML = '⚠ 检测到新文件已上传，本页面已自动锁定，选择与发布均不会生效。<a href="/">前往上传页</a>';
+      document.querySelector('main').prepend(banner);
+    }
+  };
+  const poll = async () => {
+    try {
+      const resp = await fetch(`/api/session/${sid}/status`, { cache: 'no-store' });
+      if (resp.status === 404) { disableAll(); return; }
+      const data = await resp.json();
+      if (!data.active) { disableAll(); return; }
+    } catch (e) { /* network blip: keep polling */ }
+    setTimeout(poll, 4000);
+  };
+  setTimeout(poll, 4000);
+})();
+</script>
+{% endblock %}

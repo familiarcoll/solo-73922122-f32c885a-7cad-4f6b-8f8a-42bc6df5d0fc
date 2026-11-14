@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}港口潮位 UTC 复核系统{% endblock %}</title>
+  <style>
+    :root { --blue:#1a5f9e; --red:#b42318; --amber:#b54708; --green:#067647; --gray:#667085; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: "Noto Sans CJK SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+           background:#f4f6f9; color:#1d2939; line-height:1.55; }
+    header { background:var(--blue); color:#fff; padding:14px 28px; display:flex;
+             justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+    header a { color:#dbeafe; text-decoration:none; }
+    main { max-width:1180px; margin:24px auto; padding:0 20px; }
+    .card { background:#fff; border:1px solid #e4e7ec; border-radius:10px;
+            padding:20px 24px; margin-bottom:20px; }
+    h1 { font-size:20px; margin:0; }
+    h2 { font-size:17px; margin:0 0 12px; }
+    table { border-collapse:collapse; width:100%; font-size:13.5px; }
+    th, td { border:1px solid #d0d5dd; padding:6px 9px; text-align:left; white-space:nowrap; }
+    th { background:#f2f4f7; font-weight:600; }
+    td.wrap { white-space:normal; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }
+    .b-normal { background:#e8f5ee; color:var(--green); }
+    .b-ambiguous { background:#fef4e6; color:var(--amber); }
+    .b-gap, .b-error { background:#fdeceb; color:var(--red); }
+    .b-super { background:#eef0f3; color:var(--gray); }
+    .b-stale { background:#fdeceb; color:var(--red); }
+    .b-active { background:#e8f5ee; color:var(--green); }
+    .msg { padding:10px 14px; border-radius:8px; margin-bottom:14px; font-size:14px; }
+    .msg-ok { background:#e8f5ee; color:var(--green); border:1px solid #abefc6; }
+    .msg-warn { background:#fef4e6; color:var(--amber); border:1px solid #fedf89; }
+    .msg-err { background:#fdeceb; color:var(--red); border:1px solid #fecdca; }
+    button, .btn { font:inherit; padding:8px 16px; border-radius:8px; border:1px solid var(--blue);
+            background:var(--blue); color:#fff; cursor:pointer; text-decoration:none; display:inline-block; }
+    button.secondary, .btn.secondary { background:#fff; color:var(--blue); }
+    button:disabled { background:#98a2b3; border-color:#98a2b3; cursor:not-allowed; }
+    form.inline { display:inline; }
+    .muted { color:var(--gray); font-size:13px; }
+    code { background:#f2f4f7; padding:1px 5px; border-radius:4px; }
+    .pill-row { display:flex; gap:10px; flex-wrap:wrap; margin:8px 0; }
+    .stat { background:#f9fafb; border:1px solid #e4e7ec; border-radius:8px; padding:10px 16px; font-size:13.5px; }
+    .stat b { font-size:18px; display:block; }
+    input[type=file] { font:inherit; }
+    ul.tight { margin:6px 0; padding-left:20px; }
+    ul.tight li { margin:3px 0; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>🌊 港口潮位 UTC 复核发布系统</h1>
+  <nav>
+    <a href="/">上传页</a>
+    &nbsp;|&nbsp;
+    {% if latest_pub %}
+      <a href="/download/latest">⬇ 下载最新已发布 UTC 结果（#{{ latest_pub.id }}，{{ latest_pub.row_count }} 行）</a>
+    {% else %}
+      <span style="color:#bfdbfe">尚无已发布结果</span>
+    {% endif %}
+  </nav>
+</header>
+<main>
+{% block body %}{% endblock %}
+</main>
+</body>
+</html>

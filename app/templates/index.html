@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block body %}
+{% if msg %}<div class="msg msg-err">{{ msg }}</div>{% endif %}
+
+<div class="card">
+  <h2>上传记录仪导出的本地时间水位 CSV</h2>
+  <p class="muted">
+    时区固定为 <code>America/New_York</code>。需要的列：
+    <code>device_id, source_record_id, revision, local_time, water_level</code>。
+    时间格式示例：<code>2024-11-03 01:30:00</code>（不含时区）。
+  </p>
+  <form action="/upload" method="post" enctype="multipart/form-data">
+    <p><input type="file" name="file" accept=".csv,text/csv" required></p>
+    <p><button type="submit">上传并校验</button></p>
+  </form>
+</div>
+
+<div class="card">
+  <h2>处理规则</h2>
+  <ul class="tight">
+    <li>同设备 + 同源记录只保留<b>最高修订号</b>的行；同一修订号重复且内容一致会被折叠，内容不一致直接报错。</li>
+    <li>夏令时不存在的本地时刻（春季跳时）报错；秋季重复的一小时需逐行选择「早时段 / 晚时段」。</li>
+    <li>同设备同一 UTC 时刻若来自不同源记录，判定为冲突并阻止发布。</li>
+    <li>每次上传生成独立复核页；新文件上传后，旧页面将失效，不能再发布或写入选择。</li>
+    <li>全部问题解决后才能发布 UTC CSV；任何时候都可下载上一份完整发布结果。</li>
+  </ul>
+</div>
+
+{% if latest_pub %}
+<div class="card">
+  <h2>当前最新完整发布</h2>
+  <p>
+    发布编号 #{{ latest_pub.id }} ｜ 来源文件 <code>{{ latest_pub.source_filename }}</code> ｜
+    {{ latest_pub.row_count }} 行 ｜ 发布时间 {{ latest_pub.published_at }}
+  </p>
+  <a class="btn" href="/download/latest">⬇ 下载最新结果</a>
+</div>
+{% endif %}
+{% endblock %}
